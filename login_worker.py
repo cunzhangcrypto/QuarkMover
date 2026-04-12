@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 from loguru import logger
+from DrissionPage.errors import BrowserConnectError
 
 from utils import find_chrome_path
 
@@ -29,7 +30,6 @@ const el = document.querySelector('.qrcode-display canvas')
 if (!el) return null;
 return el.toDataURL('image/png');
 """
-
 
 class QuarkLoginWorker:
     """单例后台 worker。状态机:
@@ -97,21 +97,7 @@ class QuarkLoginWorker:
         logger.info("login worker started")
         page = None
         try:
-            from DrissionPage import ChromiumOptions, ChromiumPage
-
-            co = ChromiumOptions()
-            co.auto_port()
-            co.headless(True)
-            co.set_argument("--no-first-run")
-            co.set_argument("--no-default-browser-check")
-            co.set_argument("--window-size=1280,900")
-
-            chrome = find_chrome_path()
-            if chrome:
-                logger.info(f"using chrome at {chrome}")
-                co.set_browser_path(chrome)
-
-            page = ChromiumPage(co)
+            page = self._launch_page()
             logger.info("chrome launched, navigating to pan.quark.cn")
             page.get("https://pan.quark.cn/")
             time.sleep(2)
@@ -169,6 +155,40 @@ class QuarkLoginWorker:
             logger.info("login worker exited")
 
     # ---- helpers ----
+    def _launch_page(self):
+        from DrissionPage import ChromiumOptions, ChromiumPage
+
+        last_error: Optional[Exception] = None
+        for attempt in range(1, 4):
+            try:
+                co = ChromiumOptions()
+                co.auto_port()
+                co.headless(True)
+                co.set_argument("--no-first-run")
+                co.set_argument("--no-default-browser-check")
+                co.set_argument("--disable-background-networking")
+                co.set_argument("--disable-component-update")
+                co.set_argument("--disable-default-apps")
+                co.set_argument("--disable-sync")
+                co.set_argument("--metrics-recording-only")
+                co.set_argument("--window-size=1280,900")
+
+                chrome = find_chrome_path()
+                if chrome:
+                    logger.info(f"using chrome at {chrome}")
+                    co.set_browser_path(chrome)
+
+                logger.info(f"launching headless chrome (attempt {attempt}/3)")
+                return ChromiumPage(co)
+            except BrowserConnectError as e:
+                last_error = e
+                logger.warning(f"chrome connect failed on attempt {attempt}/3: {e}")
+                if attempt < 3:
+                    time.sleep(1.5)
+
+        assert last_error is not None
+        raise last_error
+
     def _extract_and_store_qr(self, page) -> None:
         data_url = page.run_js(QR_JS)
         if data_url:

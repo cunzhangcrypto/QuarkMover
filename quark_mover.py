@@ -1373,6 +1373,7 @@ button.primary:disabled { background: var(--bg-2); color: var(--text-2); border-
         <span class="qr-empty" id="qrEmpty">加载中…</span>
       </div>
       <div class="qr-status" id="qrStatus">正在启动浏览器…</div>
+      <div class="status" id="qrMeta"></div>
     </div>
     <div class="modal-actions">
       <button id="closeLogin">取消</button>
@@ -1560,6 +1561,8 @@ $('loginBtn').onclick = async () => {
   $('qrEmpty').style.display = 'block';
   $('qrStatus').textContent = '正在启动浏览器…';
   $('qrStatus').className = 'qr-status';
+  $('qrMeta').textContent = '首次启动可能会慢一些，如首轮失败会自动重试。';
+  $('qrMeta').className = 'status';
   try {
     await apiPost('/api/login/start');
     pollLogin();
@@ -1591,6 +1594,12 @@ async function pollLogin() {
     };
     $('qrStatus').textContent = map[s.state] || s.state;
     $('qrStatus').className = 'qr-status' + (s.state === 'logged_in' ? ' ok' : s.state === 'failed' ? ' err' : '');
+    const meta = [];
+    if (s.account && s.account.username) meta.push('账号：' + s.account.username);
+    if (s.account && s.account.quota) meta.push('容量：' + s.account.quota);
+    if (s.account && s.account.note) meta.push(s.account.note);
+    $('qrMeta').textContent = s.error || meta.join(' · ');
+    $('qrMeta').className = 'status ' + (s.state === 'failed' ? 'err' : s.state === 'logged_in' ? 'ok' : '');
 
     if (s.state === 'logged_in') {
       setTimeout(() => { closeModal('loginModal'); refreshState(); }, 900);
@@ -1835,13 +1844,23 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         logger.debug("HTTP " + (format % args))
 
+    @staticmethod
+    def _is_client_disconnect(exc: BaseException) -> bool:
+        return isinstance(exc, (BrokenPipeError, ConnectionAbortedError, ConnectionResetError))
+
     def _send(self, code: int, body: bytes, ctype: str) -> None:
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except OSError as e:
+            if self._is_client_disconnect(e):
+                logger.debug(f"client disconnected before response was sent: {e}")
+                return
+            raise
 
     def _send_json(self, obj: Any, code: int = 200) -> None:
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
@@ -1897,8 +1916,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._serve_static(path)
             return self._send(404, b"not found", "text/plain")
         except Exception as e:
+            if self._is_client_disconnect(e):
+                logger.debug(f"GET client disconnected: {e}")
+                return
             logger.exception("GET handler error")
-            self._send_json({"error": f"{type(e).__name__}: {e}"}, 500)
+            try:
+                self._send_json({"error": f"{type(e).__name__}: {e}"}, 500)
+            except OSError as send_err:
+                if self._is_client_disconnect(send_err):
+                    logger.debug(f"GET error response aborted by client: {send_err}")
+                    return
+                raise
 
     def do_POST(self) -> None:
         try:
@@ -1928,8 +1956,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json({"ok": True, "job_id": job.id})
             return self._send(404, b"not found", "text/plain")
         except Exception as e:
+            if self._is_client_disconnect(e):
+                logger.debug(f"POST client disconnected: {e}")
+                return
             logger.exception("POST handler error")
-            self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+            try:
+                self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+            except OSError as send_err:
+                if self._is_client_disconnect(send_err):
+                    logger.debug(f"POST error response aborted by client: {send_err}")
+                    return
+                raise
 
 
 def main() -> None:
