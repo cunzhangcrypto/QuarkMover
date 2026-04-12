@@ -1,0 +1,12 @@
+dist/
+build/
+# keep quark_mover.spec, ignore others
+!quark_mover.spec
+__pycache__/
+*.pyc
+.chrome_profile/
+logs/
+config/cookies.txt
+config/config.json
+.gstack/
+.DS_Store
