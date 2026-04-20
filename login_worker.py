@@ -62,9 +62,10 @@ QUARK_UA = (
 QR_SCAN_AREA_XPATH = 'xpath://div[@class="scan-area"]'
 
 QR_JS_FALLBACK = """
+// 严格只在登录的 scan-area / qrcode-display 里找 canvas；
+// 不再 fallback 到任意 >=100x100 的 canvas——主页上的"下载 App / 分享"二维码会误命中。
 const el = document.querySelector('.scan-area canvas')
-      || document.querySelector('.qrcode-display canvas')
-      || Array.from(document.querySelectorAll('canvas')).find(c => c.width >= 100 && c.height >= 100);
+      || document.querySelector('.qrcode-display canvas');
 if (!el) return null;
 return el.toDataURL('image/png');
 """
@@ -137,8 +138,32 @@ class QuarkLoginWorker:
         try:
             page = self._launch_page()
             logger.info("chrome launched, navigating to pan.quark.cn")
+            # 进入 about:blank 先清一次 cookies/storage，再 navigate，双保险
+            try:
+                page.get("about:blank")
+                try:
+                    page.run_cdp("Network.clearBrowserCookies")
+                except Exception as e:
+                    logger.debug(f"clearBrowserCookies failed: {e}")
+            except Exception as e:
+                logger.debug(f"pre-clean failed: {e}")
+
             page.get("https://pan.quark.cn/")
             time.sleep(2)
+
+            # 早期检测：如果浏览器已经是登录态（极少数情况下 --incognito 仍复用），直接保存 cookies 跳过扫码
+            try:
+                cookies = self._extract_quark_cookies(page)
+                cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+                if cookie_str and self._is_logged_in(cookie_str):
+                    logger.info(f"[LOGIN] 浏览器已是登录态，跳过扫码直接保存 cookies ({len(cookies)} 项)")
+                    self.cookies_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(self.cookies_path, "w", encoding="utf-8") as f:
+                        f.write(cookie_str + "\n")
+                    self._set_state("logged_in")
+                    return
+            except Exception as e:
+                logger.debug(f"early login detect failed: {e}")
 
             # first QR extract
             self._extract_and_store_qr(page)
@@ -202,6 +227,11 @@ class QuarkLoginWorker:
                 co = ChromiumOptions()
                 co.auto_port()
                 co.headless(True)
+                # 关键：强制隐私模式 + 禁用 Chrome Sign-In / Sync，避免复用本机 Chrome 的登录态
+                # 之前的 bug：用户本机 Chrome 已登录夸克时，headless 实例也继承登录 → 访问 pan.quark.cn
+                # 直接跳主页，登录页的 .scan-area 根本不存在，导致抓 QR 时拿到错的 canvas。
+                co.set_argument("--incognito")
+                co.set_argument("--disable-features=ChromeSignIn,ChromeSignInAndSync,SyncDisabledTests")
                 co.set_argument("--no-first-run")
                 co.set_argument("--no-default-browser-check")
                 co.set_argument("--disable-background-networking")
@@ -254,6 +284,13 @@ class QuarkLoginWorker:
                 logger.debug("[QR] 未安装 pyzbar，跳过二维码内容解码（pip install pyzbar Pillow）")
             else:
                 logger.debug("[QR] 当前二维码图片解码失败")
+        else:
+            # 没找到登录 QR：大概率是已被自动登录跳转到主页，或页面结构变化。打印当前 URL 便于排查。
+            try:
+                cur_url = getattr(page, "url", "")
+            except Exception:
+                cur_url = "?"
+            logger.warning(f"[QR] 未找到登录二维码（.scan-area 不存在），当前页面: {cur_url}")
 
     def _extract_quark_cookies(self, page) -> Dict[str, str]:
         raw = page.cookies(all_domains=True, all_info=False)
