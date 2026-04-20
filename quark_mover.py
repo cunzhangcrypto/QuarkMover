@@ -164,15 +164,21 @@ def quark_is_logged_in(client: httpx.Client) -> bool:
         return False
 
 
-def q_get_stoken(client: httpx.Client, pwd_id: str) -> str:
+def q_get_stoken(client: httpx.Client, pwd_id: str, passcode: str = "") -> str:
     r = client.post(
         "https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token",
         headers=quark_headers(),
         params=quark_params(),
-        json={"pwd_id": pwd_id, "passcode": ""},
+        json={"pwd_id": pwd_id, "passcode": passcode or ""},
         timeout=30,
     )
-    data = _check(r.json(), "获取 stoken")
+    raw = r.json()
+    if raw.get("status") != 200:
+        msg = str(raw.get("message") or raw)
+        if "提取码" in msg or "passcode" in msg.lower() or raw.get("code") in (41009, 41008):
+            raise QuarkError(f"获取 stoken 失败: 需要提取码（未提供或错误）")
+        raise QuarkError(f"获取 stoken 失败: {msg}")
+    data = raw.get("data") or {}
     stoken = data.get("stoken")
     if not stoken:
         raise QuarkError("stoken 为空")
@@ -338,24 +344,34 @@ def deepseek_rewrite(client: httpx.Client, text: str) -> str:
 
 
 # ============ Pipeline ============
-SHARE_RE = re.compile(r"https?://pan\.quark\.cn/s/([A-Za-z0-9]+)")
+SHARE_RE = re.compile(r"https?://pan\.quark\.cn/s/([A-Za-z0-9]+)(?:-pwd([A-Za-z0-9]+))?")
+PASSCODE_RE = re.compile(
+    r"(?:提取码|访问码|密码|pwd|passcode|code)\s*[:：=]?\s*([A-Za-z0-9]{4,8})",
+    re.IGNORECASE,
+)
 
 
-def extract_share(text: str) -> Tuple[Optional[str], str]:
+def extract_share(text: str) -> Tuple[Optional[str], str, str]:
     m = SHARE_RE.search(text)
     if not m:
-        return None, text
+        return None, "", text
     pwd_id = m.group(1)
+    passcode = m.group(2) or ""
     cleaned = SHARE_RE.sub("", text)
+    if not passcode:
+        pm = PASSCODE_RE.search(cleaned)
+        if pm:
+            passcode = pm.group(1)
+            cleaned = cleaned[:pm.start()] + cleaned[pm.end():]
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    return pwd_id, cleaned
+    return pwd_id, passcode, cleaned
 
 
 def run_pipeline(job: "Job", raw_text: str, mode: str = "full") -> None:
     """mode: 'full' = DeepSeek 二创 + 夸克转存；'reshare_only' = 只转存不二创"""
     try:
-        pwd_id, text_no_link = extract_share(raw_text)
-        logger.info(f"[job {job.id}] start mode={mode} has_link={bool(pwd_id)} text_len={len(text_no_link)}")
+        pwd_id, src_passcode, text_no_link = extract_share(raw_text)
+        logger.info(f"[job {job.id}] start mode={mode} has_link={bool(pwd_id)} has_passcode={bool(src_passcode)} text_len={len(text_no_link)}")
 
         rewritten = ""
         rewrite_err = ""
@@ -383,7 +399,7 @@ def run_pipeline(job: "Job", raw_text: str, mode: str = "full") -> None:
             if pwd_id:
                 try:
                     job.update(step="获取分享 stoken")
-                    stoken = q_get_stoken(client, pwd_id)
+                    stoken = q_get_stoken(client, pwd_id, src_passcode)
 
                     job.update(step="读取分享文件列表")
                     files = q_list_share_files(client, pwd_id, stoken)
@@ -1375,7 +1391,27 @@ button.primary:disabled { background: var(--bg-2); color: var(--text-2); border-
       <div class="qr-status" id="qrStatus">正在启动浏览器…</div>
       <div class="status" id="qrMeta"></div>
     </div>
+    <div style="border-top:1px solid var(--line);margin:18px 0 0;padding-top:14px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+        <div style="font-family:var(--mono);font-size:12px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:var(--text-0);">扫码失败？手动导入 Cookies</div>
+        <button id="toggleManualCookie" style="font-size:12px;padding:4px 10px;">展开 ▾</button>
+      </div>
+      <div id="manualCookieBox" style="display:none;margin-top:12px;">
+        <div class="field">
+          <label>夸克网盘 Cookie（整段粘贴）</label>
+          <textarea id="manualCookieInput" placeholder="在浏览器登录 https://pan.quark.cn/ 后，F12 → Network → 任意 drive-pc.quark.cn 请求 → Headers → 复制 Cookie 的值粘贴到这里" style="min-height:96px;font-family:var(--mono);font-size:12px;"></textarea>
+        </div>
+        <div class="status" id="manualCookieStatus" style="margin-bottom:10px;">
+          获取方法：① 浏览器打开 pan.quark.cn 登录 → ② 按 F12 打开开发者工具 → ③ 切换到 Network 面板 → ④ 刷新页面，点一个 drive-pc.quark.cn 的请求 → ⑤ 在右侧 Request Headers 里复制 <code>cookie</code> 字段的完整值。
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;">
+          <button id="saveManualCookie" class="primary">保存并校验</button>
+        </div>
+      </div>
+    </div>
     <div class="modal-actions">
+      <button id="copyLogBtn" title="复制本次运行日志到剪贴板，便于发送给开发者排查">复制日志</button>
+      <button id="saveLogBtn" title="将本次运行日志另存为文件">另存日志</button>
       <button id="closeLogin">取消</button>
     </div>
   </div>
@@ -1416,6 +1452,14 @@ button.primary:disabled { background: var(--bg-2); color: var(--text-2); border-
         <option value="3">7 天</option>
         <option value="4">30 天</option>
       </select>
+    </div>
+    <div style="border-top:1px solid var(--line);margin:18px 0 14px;padding-top:14px;">
+      <div style="font-family:var(--mono);font-size:12px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:var(--text-0);margin-bottom:8px;">排查 / 反馈</div>
+      <div class="status" id="settingsLogStatus" style="margin-bottom:10px;">遇到扫码无法跳转、或其他问题？可将日志发送给开发者。</div>
+      <div style="display:flex;gap:8px;">
+        <button id="settingsCopyLog">复制日志到剪贴板</button>
+        <button id="settingsSaveLog">日志另存为文件</button>
+      </div>
     </div>
     <div class="modal-actions">
       <button id="cancelSettings">取消</button>
@@ -1563,6 +1607,9 @@ $('loginBtn').onclick = async () => {
   $('qrStatus').className = 'qr-status';
   $('qrMeta').textContent = '首次启动可能会慢一些，如首轮失败会自动重试。';
   $('qrMeta').className = 'status';
+  $('manualCookieBox').style.display = 'none';
+  $('toggleManualCookie').textContent = '展开 ▾';
+  $('manualCookieStatus').className = 'status';
   try {
     await apiPost('/api/login/start');
     pollLogin();
@@ -1575,6 +1622,35 @@ $('closeLogin').onclick = async () => {
   closeModal('loginModal');
   if (loginTimer) clearTimeout(loginTimer);
   try { await apiPost('/api/login/stop'); } catch(e) {}
+};
+
+$('toggleManualCookie').onclick = () => {
+  const box = $('manualCookieBox');
+  const btn = $('toggleManualCookie');
+  const open = box.style.display === 'none';
+  box.style.display = open ? 'block' : 'none';
+  btn.textContent = open ? '收起 ▴' : '展开 ▾';
+};
+$('saveManualCookie').onclick = async () => {
+  const v = $('manualCookieInput').value.trim();
+  const st = $('manualCookieStatus');
+  if (!v) { st.textContent = '请先粘贴 cookie 内容'; st.className = 'status err'; return; }
+  st.textContent = '校验中…'; st.className = 'status run';
+  $('saveManualCookie').disabled = true;
+  try {
+    const r = await apiPost('/api/login/manual', { cookie: v });
+    if (r.ok) {
+      st.textContent = '导入成功 ✓'; st.className = 'status ok';
+      setTimeout(() => { closeModal('loginModal'); refreshState(); }, 700);
+      try { await apiPost('/api/login/stop'); } catch(e) {}
+    } else {
+      st.textContent = r.error || '校验失败'; st.className = 'status err';
+    }
+  } catch(e) {
+    st.textContent = '请求失败: ' + e; st.className = 'status err';
+  } finally {
+    $('saveManualCookie').disabled = false;
+  }
 };
 
 async function pollLogin() {
@@ -1614,6 +1690,57 @@ async function pollLogin() {
     loginTimer = setTimeout(pollLogin, 1500);
   }
 }
+
+// ---- Log export (copy / save) ----
+async function fetchLogs() {
+  const r = await fetch('/api/logs');
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.error || '读取日志失败');
+  return j;
+}
+async function copyLogsToClipboard(statusEl) {
+  try {
+    if (statusEl) { statusEl.textContent = '读取日志…'; statusEl.className = 'status'; }
+    const j = await fetchLogs();
+    const text = j.content || '';
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (err) {
+      // 降级：textarea + execCommand
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    if (statusEl) { statusEl.textContent = '已复制 ' + text.length + ' 字符到剪贴板，可直接粘贴给开发者'; statusEl.className = 'status ok'; }
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = '复制失败: ' + e; statusEl.className = 'status err'; }
+  }
+}
+async function saveLogsAsFile(statusEl) {
+  try {
+    if (statusEl) { statusEl.textContent = '读取日志…'; statusEl.className = 'status'; }
+    const j = await fetchLogs();
+    const blob = new Blob([j.content || ''], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    a.href = url;
+    a.download = 'QuarkMover-log-' + stamp + '.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    if (statusEl) { statusEl.textContent = '已导出：' + a.download; statusEl.className = 'status ok'; }
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = '导出失败: ' + e; statusEl.className = 'status err'; }
+  }
+}
+$('copyLogBtn').onclick = () => copyLogsToClipboard($('qrMeta'));
+$('saveLogBtn').onclick = () => saveLogsAsFile($('qrMeta'));
+$('settingsCopyLog').onclick = () => copyLogsToClipboard($('settingsLogStatus'));
+$('settingsSaveLog').onclick = () => saveLogsAsFile($('settingsLogStatus'));
 
 // ---- Settings modal ----
 $('settingsBtn').onclick = async () => {
@@ -1899,6 +2026,35 @@ class Handler(BaseHTTPRequestHandler):
                 })
             if path == "/api/login/state":
                 return self._send_json(LOGIN_WORKER.snapshot())
+            if path == "/api/logs":
+                # 返回今日日志文本，供前端复制/另存；若无今日日志，拼接最近一份
+                try:
+                    files = sorted(LOG_DIR.glob("*.log"))
+                    if not files:
+                        return self._send_json({"ok": True, "filename": "", "content": "(暂无日志)"})
+                    # 取最近 2 份拼接，避免刚过 0 点时今日文件为空
+                    picks = files[-2:]
+                    chunks = []
+                    total = 0
+                    MAX = 512 * 1024  # 最多 512KB
+                    for p in picks:
+                        try:
+                            text = p.read_text(encoding="utf-8", errors="replace")
+                        except Exception as e:
+                            text = f"(读取 {p.name} 失败: {e})"
+                        chunks.append(f"===== {p.name} =====\n{text}")
+                        total += len(text)
+                    content = "\n\n".join(chunks)
+                    if len(content) > MAX:
+                        content = "(…前文已截断…)\n" + content[-MAX:]
+                    return self._send_json({
+                        "ok": True,
+                        "filename": picks[-1].name,
+                        "content": content,
+                    })
+                except Exception as e:
+                    logger.exception("read logs failed")
+                    return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"})
             if path == "/api/config":
                 return self._send_json({
                     "deepseek_api_key": get_cfg("deepseek_api_key", ""),
@@ -1941,6 +2097,39 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json({"ok": True})
             if path == "/api/login/stop":
                 LOGIN_WORKER.stop()
+                return self._send_json({"ok": True})
+            if path == "/api/login/manual":
+                body = self._read_json()
+                raw = (body.get("cookie") or "").strip()
+                if not raw:
+                    return self._send_json({"ok": False, "error": "cookie 为空"})
+                # 允许用户整段粘贴，如 "Cookie: a=b; c=d" 或带换行；统一清洗
+                if raw.lower().startswith("cookie:"):
+                    raw = raw.split(":", 1)[1].strip()
+                cookie_str = " ".join(raw.split())  # 折叠空白/换行
+                # 校验
+                try:
+                    r = httpx.get(
+                        "https://drive-pc.quark.cn/1/clouddrive/config?pr=ucpro&fr=pc&uc_param_str=",
+                        headers={
+                            "user-agent": QUARK_HEADERS_BASE["user-agent"],
+                            "origin": "https://pan.quark.cn",
+                            "referer": "https://pan.quark.cn/",
+                            "cookie": cookie_str,
+                            "accept": "application/json, text/plain, */*",
+                        },
+                        timeout=8,
+                    )
+                    ok = r.status_code == 200 and r.json().get("status") == 200
+                except Exception as e:
+                    return self._send_json({"ok": False, "error": f"校验失败: {type(e).__name__}: {e}"})
+                if not ok:
+                    return self._send_json({"ok": False, "error": "cookie 无效或已过期，请重新复制"})
+                COOKIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with open(COOKIES_PATH, "w", encoding="utf-8") as f:
+                    f.write(cookie_str + "\n")
+                _invalidate_login_cache()
+                logger.info("cookies imported manually")
                 return self._send_json({"ok": True})
             if path == "/api/generate":
                 body = self._read_json()

@@ -11,11 +11,46 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import base64
+import io
+import re
+
 import httpx
 from loguru import logger
 from DrissionPage.errors import BrowserConnectError
 
 from utils import find_chrome_path
+
+try:
+    from PIL import Image  # type: ignore
+    from pyzbar.pyzbar import decode as _zbar_decode  # type: ignore
+    _QR_DECODER_AVAILABLE = True
+except Exception as _qr_err:  # pragma: no cover
+    Image = None  # type: ignore
+    _zbar_decode = None  # type: ignore
+    _QR_DECODER_AVAILABLE = False
+    logger.debug(f"pyzbar/Pillow not available, QR URL decoding disabled: {_qr_err}")
+
+
+def _decode_qr_data_url(data_url: str) -> Optional[str]:
+    """从 data:image/png;base64 的 QR 图片中解码出 URL。失败返回 None。"""
+    if not _QR_DECODER_AVAILABLE or not data_url:
+        return None
+    m = re.match(r"data:image/[^;]+;base64,(.+)$", data_url, re.DOTALL)
+    if not m:
+        return None
+    try:
+        raw = base64.b64decode(m.group(1))
+        img = Image.open(io.BytesIO(raw))  # type: ignore[union-attr]
+        results = _zbar_decode(img)  # type: ignore[misc]
+        for r in results:
+            try:
+                return r.data.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"QR decode failed: {e}")
+    return None
 
 QUARK_DOMAINS = (".quark.cn", "quark.cn", "pan.quark.cn", "drive-pc.quark.cn", "drive.quark.cn")
 QUARK_CHECK_URL = "https://drive-pc.quark.cn/1/clouddrive/config?pr=ucpro&fr=pc&uc_param_str="
@@ -24,8 +59,11 @@ QUARK_UA = (
     "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 )
 
-QR_JS = """
-const el = document.querySelector('.qrcode-display canvas')
+QR_SCAN_AREA_XPATH = 'xpath://div[@class="scan-area"]'
+
+QR_JS_FALLBACK = """
+const el = document.querySelector('.scan-area canvas')
+      || document.querySelector('.qrcode-display canvas')
       || Array.from(document.querySelectorAll('canvas')).find(c => c.width >= 100 && c.height >= 100);
 if (!el) return null;
 return el.toDataURL('image/png');
@@ -190,9 +228,32 @@ class QuarkLoginWorker:
         raise last_error
 
     def _extract_and_store_qr(self, page) -> None:
-        data_url = page.run_js(QR_JS)
+        data_url: Optional[str] = None
+        # 首选：对 .scan-area 元素截图（避免误取到"下载 App"等其它 canvas）
+        try:
+            ele = page.ele(QR_SCAN_AREA_XPATH, timeout=2)
+            if ele:
+                b64 = ele.get_screenshot(as_base64="png")
+                if b64:
+                    data_url = f"data:image/png;base64,{b64}"
+        except Exception as e:
+            logger.debug(f"scan-area screenshot failed: {e}")
+        # 兜底：canvas.toDataURL
+        if not data_url:
+            try:
+                data_url = page.run_js(QR_JS_FALLBACK)
+            except Exception as e:
+                logger.debug(f"canvas JS fallback failed: {e}")
         if data_url:
             self._set_state(self._state, qr=data_url)
+            # 解码二维码内容，便于排查扫码后无法跳转的问题
+            decoded = _decode_qr_data_url(data_url)
+            if decoded:
+                logger.info(f"[QR] 二维码内容: {decoded}")
+            elif not _QR_DECODER_AVAILABLE:
+                logger.debug("[QR] 未安装 pyzbar，跳过二维码内容解码（pip install pyzbar Pillow）")
+            else:
+                logger.debug("[QR] 当前二维码图片解码失败")
 
     def _extract_quark_cookies(self, page) -> Dict[str, str]:
         raw = page.cookies(all_domains=True, all_info=False)
