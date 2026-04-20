@@ -12,5 +12,7 @@ __pycache__/
 logs/
 config/cookies.txt
 config/config.json
+config/accounts.json
+.claude/
 .gstack/
 .DS_Store

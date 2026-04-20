@@ -77,11 +77,14 @@ class QuarkLoginWorker:
     """
 
     def __init__(self, cookies_path: Path, poll_interval: float = 3.0,
-                 qr_refresh_interval: float = 60.0, timeout: float = 300.0):
+                 qr_refresh_interval: float = 60.0, timeout: float = 300.0,
+                 on_success=None):
         self.cookies_path = cookies_path
         self.poll_interval = poll_interval
         self.qr_refresh_interval = qr_refresh_interval
         self.timeout = timeout
+        # 登录成功时回调，参数为新获取的 cookie_str；用于把新账号写入账号存储
+        self.on_success = on_success
 
         self._lock = threading.Lock()
         self._state = "idle"
@@ -123,6 +126,14 @@ class QuarkLoginWorker:
             if self._state != "logged_in":
                 self._state = "idle"
 
+    def _fire_on_success(self, cookie_str: str) -> None:
+        if not self.on_success:
+            return
+        try:
+            self.on_success(cookie_str)
+        except Exception as e:
+            logger.warning(f"on_success callback failed: {e}")
+
     # ---- worker thread ----
     def _set_state(self, state: str, qr: Optional[str] = None, error: Optional[str] = None) -> None:
         with self._lock:
@@ -160,6 +171,7 @@ class QuarkLoginWorker:
                     self.cookies_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(self.cookies_path, "w", encoding="utf-8") as f:
                         f.write(cookie_str + "\n")
+                    self._fire_on_success(cookie_str)
                     self._set_state("logged_in")
                     return
             except Exception as e:
@@ -193,6 +205,7 @@ class QuarkLoginWorker:
                         self.cookies_path.parent.mkdir(parents=True, exist_ok=True)
                         with open(self.cookies_path, "w", encoding="utf-8") as f:
                             f.write(cookie_str + "\n")
+                        self._fire_on_success(cookie_str)
                         self._set_state("logged_in")
                         return
                 except Exception as e:

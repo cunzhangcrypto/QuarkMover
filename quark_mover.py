@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from loguru import logger
 
+from accounts import AccountStore
 from login_worker import QuarkLoginWorker
 from utils import app_root, pick_free_port, setup_logger
 from version import APP_VERSION
@@ -142,12 +143,32 @@ class QuarkAuthError(QuarkError):
     pass
 
 
+# 把夸克后端英文错误码翻译成用户看得懂的中文提示；命中时 QuarkError.message 用中文
+QUARK_FRIENDLY_ERRORS = [
+    ("user not real name", "当前账号未完成实名认证，无法创建分享。请打开夸克 App → 我的 → 设置 → 账号与安全 → 实名认证，完成后再试。"),
+    ("capacity limit", "网盘容量不足，请先清理夸克网盘空间后再试。"),
+    ("risk control", "当前账号被风控，请稍后再试或更换账号。"),
+    ("share frequency", "分享操作过于频繁，请等待几分钟后再试。"),
+]
+
+
+def _friendly_quark_msg(raw_msg: str) -> Optional[str]:
+    low = raw_msg.lower()
+    for key, friendly in QUARK_FRIENDLY_ERRORS:
+        if key in low:
+            return friendly
+    return None
+
+
 def _check(data: Dict[str, Any], op: str) -> Dict[str, Any]:
     if data.get("status") != 200:
         code = data.get("code")
         msg = data.get("message") or data
         if code == 31001 or "login" in str(msg).lower():
             raise QuarkAuthError(f"{op} 失败：未登录或登录态过期")
+        friendly = _friendly_quark_msg(str(msg))
+        if friendly:
+            raise QuarkError(f"{op} 失败：{friendly}")
         raise QuarkError(f"{op} 失败: {msg}")
     return data.get("data") or {}
 
@@ -163,6 +184,59 @@ def quark_is_logged_in(client: httpx.Client) -> bool:
         return r.json().get("status") == 200
     except Exception:
         return False
+
+
+def quark_account_info(client: httpx.Client) -> Dict[str, Any]:
+    """返回 {logged_in, account_hint} — 若已登录，从账户接口提取昵称/手机号等标识。"""
+    try:
+        # 先确认登录态
+        r = client.get(
+            "https://drive-pc.quark.cn/1/clouddrive/config",
+            headers=quark_headers(), params=quark_params(), timeout=8,
+        )
+        if r.json().get("status") != 200:
+            return {"logged_in": False, "account_hint": ""}
+    except Exception:
+        return {"logged_in": False, "account_hint": ""}
+
+    def _clean(s: Any) -> str:
+        if not isinstance(s, str) or not s:
+            return ""
+        # 剔除无法编码为 UTF-8 的代理字符（实测 /account/info 偶发返回这种脏数据）
+        try:
+            s.encode("utf-8")
+        except UnicodeEncodeError:
+            return ""
+        return s.strip()
+
+    hint = ""
+    # 尝试拉账户信息（多个候选端点，命中就用）
+    endpoints = [
+        ("https://pan.quark.cn/account/info", {"fr": "pc", "platform": "pc"}),
+        ("https://drive-pc.quark.cn/1/clouddrive/member", quark_params()),
+    ]
+    for url, params in endpoints:
+        try:
+            r = client.get(url, headers=quark_headers(), params=params, timeout=6)
+            j = r.json()
+            data = j.get("data") or j  # /account/info 与 /member 结构不同
+            if not isinstance(data, dict):
+                continue
+            nickname = _clean(data.get("nickname") or data.get("username") or "")
+            mobile = _clean(data.get("mobile") or data.get("phone") or "")
+            if nickname and mobile:
+                hint = f"{nickname}（{mobile}）"
+            elif nickname:
+                hint = nickname
+            elif mobile:
+                hint = mobile
+            if hint:
+                break
+        except Exception:
+            continue
+    if not hint:
+        hint = "已登录"
+    return {"logged_in": True, "account_hint": hint}
 
 
 def q_get_stoken(client: httpx.Client, pwd_id: str, passcode: str = "") -> str:
@@ -557,7 +631,27 @@ class JobManager:
 
 
 JOB_MANAGER = JobManager()
-LOGIN_WORKER = QuarkLoginWorker(COOKIES_PATH)
+ACCOUNTS = AccountStore(ROOT / "config" / "accounts.json", COOKIES_PATH)
+
+
+def _on_login_success(cookie_str: str) -> None:
+    """登录 worker 登录成功后的回调：查询账号信息并写入 accounts store。"""
+    hint = "已登录"
+    try:
+        with httpx.Client() as client:
+            info = quark_account_info(client)
+        if info.get("account_hint"):
+            hint = info["account_hint"]
+    except Exception as e:
+        logger.debug(f"fetch account hint failed: {e}")
+    try:
+        ACCOUNTS.upsert(cookie_str, hint=hint)
+    except Exception as e:
+        logger.warning(f"记账号到 accounts store 失败: {e}")
+    _invalidate_login_cache()
+
+
+LOGIN_WORKER = QuarkLoginWorker(COOKIES_PATH, on_success=_on_login_success)
 
 
 # ============ State helpers ============
@@ -1378,12 +1472,26 @@ button.primary:disabled { background: var(--bg-2); color: var(--text-2); border-
   </div>
 </div>
 
-<!-- Login modal -->
+<!-- Login / Accounts modal -->
 <div class="modal-bg" id="loginModal" data-open="false">
   <div class="modal">
-    <h3>// 扫码登录</h3>
-    <div class="modal-title">扫码登录夸克网盘</div>
-    <p>请使用夸克 App 扫描下方二维码完成登录。后台每 3 秒检查一次登录状态，成功后自动关闭。</p>
+    <h3>// 账号</h3>
+    <div class="modal-title" id="loginModalTitle">账号管理</div>
+
+    <!-- 账号列表视图 -->
+    <div id="accountListView">
+      <div id="accountList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;"></div>
+      <div id="accountEmpty" style="display:none;padding:24px;text-align:center;color:var(--text-1);border:1px dashed var(--line);border-radius:8px;margin-bottom:14px;">
+        暂无账号，请添加
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="primary" id="addAccountBtn">+ 添加新账号</button>
+      </div>
+    </div>
+
+    <!-- 扫码视图（添加新账号或手动导入） -->
+    <div id="loginQrView" style="display:none;">
+    <p>请使用夸克 App 扫描下方二维码登录新账号。后台每 3 秒检查一次，成功后自动加入账号列表。</p>
     <div class="qr-wrap">
       <div class="qr-frame">
         <img id="qrImg" alt="">
@@ -1410,10 +1518,12 @@ button.primary:disabled { background: var(--bg-2); color: var(--text-2); border-
         </div>
       </div>
     </div>
+    </div><!-- /loginQrView -->
     <div class="modal-actions">
       <button id="copyLogBtn" title="复制本次运行日志到剪贴板，便于发送给开发者排查">复制日志</button>
       <button id="saveLogBtn" title="将本次运行日志另存为文件">另存日志</button>
-      <button id="closeLogin">取消</button>
+      <button id="backToListBtn" style="display:none;">返回列表</button>
+      <button id="closeLogin">关闭</button>
     </div>
   </div>
 </div>
@@ -1567,11 +1677,18 @@ async function refreshState() {
 
     const loginBtn = $('loginBtn');
     if (s.logged_in) {
-      loginBtn.textContent = '刷新登录状态';
+      // 顺便把当前账号 hint 显示在按钮上
+      let hint = '';
+      try {
+        const a = await apiGet('/api/accounts');
+        const active = (a.accounts || []).find(x => x.active);
+        if (active) hint = active.hint || '';
+      } catch(e) {}
+      loginBtn.textContent = hint ? ('账号 · ' + hint) : '账号管理';
       loginBtn.classList.remove('need-login');
       loginBtn.classList.add('logged-in');
     } else {
-      loginBtn.textContent = '扫码登录夸克';
+      loginBtn.textContent = '登录夸克';
       loginBtn.classList.remove('logged-in');
       loginBtn.classList.add('need-login');
     }
@@ -1598,10 +1715,79 @@ document.querySelectorAll('.mode-btn').forEach(btn => {
   };
 });
 
-// ---- Login modal ----
+// ---- Accounts & Login modal ----
 let loginTimer = null;
+function showLoginView(which) {
+  // which: 'list' | 'qr'
+  $('accountListView').style.display = which === 'list' ? 'block' : 'none';
+  $('loginQrView').style.display = which === 'qr' ? 'block' : 'none';
+  $('backToListBtn').style.display = which === 'qr' ? 'inline-block' : 'none';
+  $('loginModalTitle').textContent = which === 'list' ? '账号管理' : '添加新账号';
+}
+
+async function renderAccountList() {
+  const wrap = $('accountList');
+  wrap.innerHTML = '';
+  let accounts = [];
+  try {
+    const r = await apiGet('/api/accounts');
+    accounts = r.accounts || [];
+  } catch (e) {}
+  if (!accounts.length) {
+    $('accountEmpty').style.display = 'block';
+    return;
+  }
+  $('accountEmpty').style.display = 'none';
+  accounts.forEach(a => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid ' + (a.active ? 'var(--ok)' : 'var(--line)') + ';border-radius:8px;background:var(--bg-0);';
+    const dot = document.createElement('span');
+    dot.textContent = a.active ? '●' : '○';
+    dot.style.cssText = 'color:' + (a.active ? 'var(--ok)' : 'var(--text-1)') + ';font-size:14px;';
+    const text = document.createElement('div');
+    text.style.flex = '1';
+    const hintEl = document.createElement('div');
+    hintEl.textContent = a.hint || '已登录';
+    hintEl.style.cssText = 'font-family:var(--mono);font-size:14px;color:var(--text-0);';
+    const sub = document.createElement('div');
+    sub.textContent = a.active ? '当前使用中' : ('最后使用 ' + (a.last_used_at ? new Date(a.last_used_at * 1000).toLocaleString() : '-'));
+    sub.style.cssText = 'font-size:11px;color:var(--text-1);margin-top:2px;';
+    text.appendChild(hintEl); text.appendChild(sub);
+    row.appendChild(dot); row.appendChild(text);
+
+    if (!a.active) {
+      const sw = document.createElement('button');
+      sw.textContent = '切换';
+      sw.style.fontSize = '12px';
+      sw.onclick = async () => {
+        const r = await apiPost('/api/accounts/switch', { id: a.id });
+        if (r.ok) { await renderAccountList(); refreshState(); }
+        else alert(r.error || '切换失败');
+      };
+      row.appendChild(sw);
+    }
+    const del = document.createElement('button');
+    del.textContent = '删除';
+    del.style.fontSize = '12px';
+    del.onclick = async () => {
+      if (!confirm('确定删除账号「' + (a.hint || a.id) + '」？删除后需重新扫码添加。')) return;
+      const r = await apiPost('/api/accounts/remove', { id: a.id });
+      if (r.ok) { await renderAccountList(); refreshState(); }
+      else alert(r.error || '删除失败');
+    };
+    row.appendChild(del);
+    wrap.appendChild(row);
+  });
+}
+
 $('loginBtn').onclick = async () => {
   openModal('loginModal');
+  showLoginView('list');
+  await renderAccountList();
+};
+
+async function startQrFlow() {
+  showLoginView('qr');
   $('qrImg').removeAttribute('src');
   $('qrEmpty').style.display = 'block';
   $('qrStatus').textContent = '正在启动浏览器…';
@@ -1611,6 +1797,7 @@ $('loginBtn').onclick = async () => {
   $('manualCookieBox').style.display = 'none';
   $('toggleManualCookie').textContent = '展开 ▾';
   $('manualCookieStatus').className = 'status';
+  $('manualCookieInput').value = '';
   try {
     await apiPost('/api/login/start');
     pollLogin();
@@ -1618,11 +1805,19 @@ $('loginBtn').onclick = async () => {
     $('qrStatus').textContent = '启动失败: ' + e;
     $('qrStatus').className = 'qr-status err';
   }
+}
+$('addAccountBtn').onclick = startQrFlow;
+$('backToListBtn').onclick = async () => {
+  if (loginTimer) clearTimeout(loginTimer);
+  try { await apiPost('/api/login/stop'); } catch(e) {}
+  await renderAccountList();
+  showLoginView('list');
 };
 $('closeLogin').onclick = async () => {
   closeModal('loginModal');
   if (loginTimer) clearTimeout(loginTimer);
   try { await apiPost('/api/login/stop'); } catch(e) {}
+  refreshState();
 };
 
 $('toggleManualCookie').onclick = () => {
@@ -1641,9 +1836,14 @@ $('saveManualCookie').onclick = async () => {
   try {
     const r = await apiPost('/api/login/manual', { cookie: v });
     if (r.ok) {
-      st.textContent = '导入成功 ✓'; st.className = 'status ok';
-      setTimeout(() => { closeModal('loginModal'); refreshState(); }, 700);
+      st.textContent = '导入成功 ' + (r.account_hint ? ('· ' + r.account_hint) : '') + ' ✓';
+      st.className = 'status ok';
       try { await apiPost('/api/login/stop'); } catch(e) {}
+      setTimeout(async () => {
+        await renderAccountList();
+        showLoginView('list');
+        refreshState();
+      }, 700);
     } else {
       st.textContent = r.error || '校验失败'; st.className = 'status err';
     }
@@ -1679,7 +1879,11 @@ async function pollLogin() {
     $('qrMeta').className = 'status ' + (s.state === 'failed' ? 'err' : s.state === 'logged_in' ? 'ok' : '');
 
     if (s.state === 'logged_in') {
-      setTimeout(() => { closeModal('loginModal'); refreshState(); }, 900);
+      setTimeout(async () => {
+        await renderAccountList();
+        showLoginView('list');
+        refreshState();
+      }, 900);
       return;
     }
     if (s.state === 'failed') {
@@ -2028,6 +2232,24 @@ class Handler(BaseHTTPRequestHandler):
                 })
             if path == "/api/login/state":
                 return self._send_json(LOGIN_WORKER.snapshot())
+            if path == "/api/login/info":
+                # precheck：当前 active 账号是否有效 + 展示 hint
+                if not load_cookie():
+                    return self._send_json({"logged_in": False, "account_hint": ""})
+                try:
+                    with httpx.Client(http2=False, timeout=8) as client:
+                        info = quark_account_info(client)
+                    # 若拿到更新的 hint，顺便更新 active 账号的 hint
+                    if info.get("logged_in") and info.get("account_hint"):
+                        active = next((a for a in ACCOUNTS.list_accounts() if a["active"]), None)
+                        if active:
+                            ACCOUNTS.update_hint(active["id"], info["account_hint"])
+                    return self._send_json(info)
+                except Exception as e:
+                    logger.debug(f"login info failed: {e}")
+                    return self._send_json({"logged_in": False, "account_hint": ""})
+            if path == "/api/accounts":
+                return self._send_json({"accounts": ACCOUNTS.list_accounts()})
             if path == "/api/logs":
                 # 返回今日日志文本，供前端复制/另存；若无今日日志，拼接最近一份
                 try:
@@ -2100,6 +2322,20 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/login/stop":
                 LOGIN_WORKER.stop()
                 return self._send_json({"ok": True})
+            if path == "/api/accounts/switch":
+                body = self._read_json()
+                aid = (body.get("id") or "").strip()
+                if not aid or not ACCOUNTS.switch(aid):
+                    return self._send_json({"ok": False, "error": "账号不存在"})
+                _invalidate_login_cache()
+                return self._send_json({"ok": True})
+            if path == "/api/accounts/remove":
+                body = self._read_json()
+                aid = (body.get("id") or "").strip()
+                if not aid or not ACCOUNTS.remove(aid):
+                    return self._send_json({"ok": False, "error": "账号不存在"})
+                _invalidate_login_cache()
+                return self._send_json({"ok": True})
             if path == "/api/login/manual":
                 body = self._read_json()
                 raw = (body.get("cookie") or "").strip()
@@ -2127,12 +2363,34 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send_json({"ok": False, "error": f"校验失败: {type(e).__name__}: {e}"})
                 if not ok:
                     return self._send_json({"ok": False, "error": "cookie 无效或已过期，请重新复制"})
-                COOKIES_PATH.parent.mkdir(parents=True, exist_ok=True)
-                with open(COOKIES_PATH, "w", encoding="utf-8") as f:
-                    f.write(cookie_str + "\n")
+                # 查账号 hint；失败则用默认
+                hint = "已登录"
+                try:
+                    with httpx.Client(http2=False, timeout=8) as c2:
+                        # quark_account_info 内部用 quark_headers 读全局 cookies.txt，
+                        # 所以先短暂写入再查（try/finally 恢复 active）
+                        prev_active = ACCOUNTS.active_cookie()
+                        COOKIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+                        with open(COOKIES_PATH, "w", encoding="utf-8") as f:
+                            f.write(cookie_str + "\n")
+                        try:
+                            info = quark_account_info(c2)
+                            if info.get("account_hint"):
+                                hint = info["account_hint"]
+                        finally:
+                            # 先还原成旧 active，随后 upsert 会再覆盖为新账号
+                            if prev_active:
+                                with open(COOKIES_PATH, "w", encoding="utf-8") as f:
+                                    f.write(prev_active + "\n")
+                except Exception as e:
+                    logger.debug(f"fetch hint for manual cookie failed: {e}")
+                try:
+                    ACCOUNTS.upsert(cookie_str, hint=hint)
+                except Exception as e:
+                    return self._send_json({"ok": False, "error": f"保存账号失败: {e}"})
                 _invalidate_login_cache()
-                logger.info("cookies imported manually")
-                return self._send_json({"ok": True})
+                logger.info(f"cookies imported manually, hint={hint}")
+                return self._send_json({"ok": True, "account_hint": hint})
             if path == "/api/generate":
                 body = self._read_json()
                 text = body.get("text", "")
