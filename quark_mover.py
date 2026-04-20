@@ -1330,7 +1330,7 @@ button.primary:disabled { background: var(--bg-2); color: var(--text-2); border-
         <textarea id="input" placeholder="只需粘贴 pan.quark.cn/s/xxxxx 即可，不会调 DeepSeek"></textarea>
       </div>
       <div class="panel-foot">
-        <button class="primary" id="go">一键生成</button>
+        <button class="primary" id="go">生成</button>
         <button id="clear">清空</button>
         <span class="status" id="status"></span>
       </div>
@@ -1350,7 +1350,7 @@ button.primary:disabled { background: var(--bg-2); color: var(--text-2); border-
         <textarea id="output" placeholder="生成后的内容会显示在这里，可手动编辑"></textarea>
       </div>
       <div class="panel-foot">
-        <button class="primary" id="copy">一键复制</button>
+        <button class="primary" id="copy">复制</button>
         <button id="copyLink">仅复制链接</button>
         <span class="status" id="copyStatus"></span>
       </div>
