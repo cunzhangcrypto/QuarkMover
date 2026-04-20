@@ -8,18 +8,18 @@
 
 | 系统 | 下载文件 |
 |------|---------|
-| Windows | `QuarkMover-Windows.exe` |
-| macOS (Intel) | `QuarkMover-macOS-Intel` |
-| macOS (Apple Silicon) | `QuarkMover-macOS-ARM` |
-| Linux | `QuarkMover-Linux` |
+| Windows | `QuarkMover-Windows-v<版本>.exe` |
+| macOS (Intel) | `QuarkMover-macOS-Intel-v<版本>.zip` |
+| macOS (Apple Silicon) | `QuarkMover-macOS-ARM-v<版本>.zip` |
+| Linux | `QuarkMover-Linux-v<版本>.tar.gz` |
 
 ## 使用方法
 
 ### 第一步：打开工具
 
-- **Windows**：双击 `QuarkMover-Windows.exe`
-- **macOS**：终端运行 `chmod +x QuarkMover-macOS-* && ./QuarkMover-macOS-*`
-- **Linux**：终端运行 `chmod +x QuarkMover-Linux && ./QuarkMover-Linux`
+- **Windows**：双击 `QuarkMover-Windows-v*.exe`
+- **macOS**：双击 `QuarkMover-macOS-*.zip` 解压，终端 `cd` 到解压目录后运行 `./QuarkMover`；首次运行如被 Gatekeeper 拦截，右键「打开」→ 确认放行即可
+- **Linux**：`tar -xzf QuarkMover-Linux-v*.tar.gz && ./QuarkMover`
 
 工具会自动在浏览器中打开操作页面。
 

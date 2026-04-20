@@ -2,6 +2,10 @@ dist/
 build/
 # keep quark_mover.spec, ignore others
 !quark_mover.spec
+# 构建产物不入库
+QuarkMover-*.exe
+QuarkMover-*.zip
+QuarkMover-*.tar.gz
 __pycache__/
 *.pyc
 .chrome_profile/

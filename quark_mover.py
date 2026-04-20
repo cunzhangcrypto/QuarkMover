@@ -24,6 +24,7 @@ from loguru import logger
 
 from login_worker import QuarkLoginWorker
 from utils import app_root, pick_free_port, setup_logger
+from version import APP_VERSION
 
 if sys.platform == "win32":
     try:
@@ -1298,7 +1299,7 @@ button.primary:disabled { background: var(--bg-2); color: var(--text-2); border-
     <div class="brand-mark"></div>
     <div>
       <span class="brand-name">夸克转存助手</span>
-      <span class="brand-sub">/ V1.0.1</span>
+      <span class="brand-sub">/ v__APP_VERSION__</span>
     </div>
   </div>
   <div class="status-rail">
@@ -2018,7 +2019,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = self.path.split("?", 1)[0]
             if path in ("/", "/index.html"):
-                return self._send(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                html = INDEX_HTML.replace("__APP_VERSION__", APP_VERSION)
+                return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
             if path == "/api/state":
                 return self._send_json({
                     "has_key": _has_key(),
@@ -2158,14 +2160,33 @@ class Handler(BaseHTTPRequestHandler):
                 raise
 
 
+def _log_startup_banner() -> None:
+    """启动横幅 - 将版本号与环境信息打到日志，方便用户把日志发给开发者时一眼看出环境。"""
+    import platform
+    from utils import find_chrome_path
+
+    frozen = bool(getattr(sys, "frozen", False))
+    chrome = find_chrome_path() or "(未检测到 Chrome/Edge)"
+    logger.info("=" * 60)
+    logger.info(f"夸克转存助手  v{APP_VERSION}  (frozen={frozen})")
+    logger.info(f"Python {platform.python_version()} · {platform.system()} {platform.release()} · {platform.machine()}")
+    logger.info(f"可执行文件: {sys.executable}")
+    logger.info(f"项目根目录: {ROOT}")
+    logger.info(f"配置文件:   {CONFIG_PATH}")
+    logger.info(f"Cookie:     {COOKIES_PATH} (exists={COOKIES_PATH.exists()})")
+    logger.info(f"日志目录:   {LOG_DIR}")
+    logger.info(f"浏览器:     {chrome}")
+    logger.info("=" * 60)
+
+
 def main() -> None:
+    _log_startup_banner()
     preferred = int(get_cfg("port", 8899))
     port = pick_free_port(preferred)
     if port != preferred:
         logger.warning(f"端口 {preferred} 占用，改用 {port}")
     url = f"http://127.0.0.1:{port}"
     logger.info(f"夸克转存助手 已启动: {url}")
-    logger.info("日志目录: " + str(LOG_DIR))
     try:
         webbrowser.open(url)
     except Exception:

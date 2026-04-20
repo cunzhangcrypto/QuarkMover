@@ -14,17 +14,21 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: QuarkMover-Windows.exe
+            platform: Windows
             pyinstaller_name: QuarkMover.exe
+            package: exe        # 直接发可执行文件
           - os: macos-latest
-            artifact: QuarkMover-macOS-Intel
+            platform: macOS-Intel
             pyinstaller_name: QuarkMover
+            package: zip        # 打包 zip 以保留可执行位，避免 macOS 用 TextEdit 打开
           - os: macos-14
-            artifact: QuarkMover-macOS-ARM
+            platform: macOS-ARM
             pyinstaller_name: QuarkMover
+            package: zip
           - os: ubuntu-latest
-            artifact: QuarkMover-Linux
+            platform: Linux
             pyinstaller_name: QuarkMover
+            package: tar.gz     # tar.gz 保留可执行位
 
     runs-on: ${{ matrix.os }}
 
@@ -43,16 +47,42 @@ jobs:
       - name: Build executable
         run: pyinstaller quark_mover.spec
 
-      - name: Rename artifact
+      - name: Package artifact (with version in filename)
+        id: pkg
         shell: bash
         run: |
-          mv dist/${{ matrix.pyinstaller_name }} dist/${{ matrix.artifact }}
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"      # e.g. v1.0.1
+          BASE="QuarkMover-${{ matrix.platform }}-${VERSION}"
+          cd dist
+          case "${{ matrix.package }}" in
+            exe)
+              OUT="${BASE}.exe"
+              mv "${{ matrix.pyinstaller_name }}" "${OUT}"
+              ;;
+            zip)
+              chmod +x "${{ matrix.pyinstaller_name }}"
+              # 重命名成带版本号的稳定文件名后再打包；zip -y 保留文件属性
+              mv "${{ matrix.pyinstaller_name }}" "QuarkMover"
+              OUT="${BASE}.zip"
+              zip -y "${OUT}" QuarkMover
+              ;;
+            tar.gz)
+              chmod +x "${{ matrix.pyinstaller_name }}"
+              mv "${{ matrix.pyinstaller_name }}" "QuarkMover"
+              OUT="${BASE}.tar.gz"
+              tar -czf "${OUT}" QuarkMover
+              ;;
+          esac
+          echo "artifact_name=${OUT}" >> "$GITHUB_OUTPUT"
+          echo "artifact_path=dist/${OUT}" >> "$GITHUB_OUTPUT"
+          ls -lh "${OUT}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          name: ${{ steps.pkg.outputs.artifact_name }}
+          path: ${{ steps.pkg.outputs.artifact_path }}
 
   release:
     needs: build
