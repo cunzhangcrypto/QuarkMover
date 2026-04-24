@@ -1468,10 +1468,27 @@ button.primary:disabled { background: var(--bg-2); color: var(--text-2); border-
 <div class="promo-banner">
   <div class="promo-banner-inner">
     <div class="promo-banner-text">
-      <div class="promo-banner-title">想用 AI 做网盘拉新日赚 1000？</div>
-      <div class="promo-banner-desc">零基础也能上手，手把手教你用 AI 工具做推特网盘拉新</div>
+      <div class="promo-banner-title">Web3村长带你玩转 AI 自动化</div>
+      <div class="promo-banner-desc">关注我的博客与AI工具箱，获取更多网盘资源与实战干货教程</div>
     </div>
-    <button class="primary" id="promoBtn">加入社群 →</button>
+    
+    <div class="promo-links" style="display: flex; gap: 8px; flex-wrap: wrap;">
+      
+      <button class="primary" id="promoBtn" style="cursor: pointer; padding: 8px 12px;">加入社群 →</button>
+
+      <a href="https://www.cunzhangblog.com/" target="_blank" style="text-decoration: none;">
+        <button class="primary" style="cursor: pointer; background-color: #ff4d4f; border: none; padding: 8px 12px; border-radius: 4px; color: white;">
+          访问博客→
+        </button>
+      </a>
+
+      <a href="https://www.cunzhangai.com/" target="_blank" style="text-decoration: none;">
+        <button class="primary" style="cursor: pointer; background-color: #1890ff; border: none; padding: 8px 12px; border-radius: 4px; color: white;">
+          AI 工具箱→
+        </button>
+      </a>
+
+    </div>
   </div>
 </div>
 
@@ -1585,16 +1602,16 @@ button.primary:disabled { background: var(--bg-2); color: var(--text-2); border-
 <!-- 推广弹窗 -->
 <div class="modal-bg" id="promoModal" data-open="false">
   <div class="modal" style="max-width:600px;">
-    <h3>// 加入社群</h3>
-    <div class="modal-title">想用 AI 做网盘拉新日赚 1000？</div>
-    <p>手把手教你用 AI 工具做推特网盘拉新，零基础也能上手。<br>扫码关注公众号或加入交流群，获取最新教程和工具更新。</p>
+    <h3>// 加入村长社群</h3>
+    <div class="modal-title">想找最新网盘爆款资源？</div>
+    <p>关注村长，每日更新全网稀缺资源素材。<br>扫码关注电报频道或加入交流群，获取最新教程和工具更新。</p>
     <div class="promo-qrs">
       <div class="promo-qr">
-        <img src="/static/qr_gongzhonghao.webp" alt="公众号" onerror="this.closest('.promo-qr').style.display='none'">
-        <span>关注公众号</span>
+        <img src="/static/tgchannel.webp" alt="电报频道" onerror="this.closest('.promo-qr').style.display='none'">
+        <span>电报频道</span>
       </div>
       <div class="promo-qr">
-        <img src="/static/qr_group.webp" alt="交流群" onerror="this.closest('.promo-qr').style.display='none'">
+        <img src="/static/tggroup.webp" alt="交流群" onerror="this.closest('.promo-qr').style.display='none'">
         <span>加入交流群</span>
       </div>
     </div>
