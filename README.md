@@ -4,6 +4,9 @@
 [![Platform](https://img.shields.io/badge/platform-windows%20%7C%20macos%20%7C%20linux-lightgrey)](https://github.com/)
 
 本项目是在原官方开源版本基础上的深度定制与修复版。针对近期夸克网盘风控升级导致的“扫码无反应”、“扫码请求过期”等问题，进行了登录内核级的重构。
+> **🚀 快捷下载地址**：[点此前往夸克网盘下载 v1.1.2 安装包]([[https://pan.quark.cn](https://pan.quark.cn/s/a5bb9cc1e723))
+---
+
 
 ## 🌟 核心改进：为什么选择这一版？
 
