@@ -1,9 +1,3 @@
-这是一个为您精心准备的 `README.md` 文件。它结合了您的开发背景、功能改进逻辑以及针对普通用户的操作指南。
-
-您可以直接根据需要微调其中的描述，并记得在最下方补充原作者的 GitHub 链接。
-
----
-
 # 夸克转存助手 (QuarkMover) - 增强修复版
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
